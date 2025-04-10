@@ -1,0 +1,9 @@
+import React from 'react'
+
+function IconStepLineChart() {
+  return (
+    <svg  viewBox="0 0 28 28" width="28" height="28" fill="currentColor"><path d="M19 5h5v1h-4v13h-6v-7h-4v12H5v-1h4V11h6v7h4V5Z"></path></svg>
+  )
+}
+
+export default IconStepLineChart
