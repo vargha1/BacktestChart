@@ -15,10 +15,10 @@ interface rayLine {
 
 function RayLine(chartRef : React.RefObject<IChartApi> , candlestickSeriesRef : React.RefObject<ISeriesApi<SeriesType>>) {
 
-    function drawRayLine (firstPointRef : point , secondPointRef : point , options?:rayLine) {
+    function drawRayLine (firstPointRef : point , secondPointRef : point , options?:rayLine): TrendLine | null {
         const timeScale = chartRef.current.timeScale();
         const visibleRange = timeScale.getVisibleRange();
-        if (!visibleRange) return;
+        if (!visibleRange) return null;
         const { time: x1, price: y1 } = firstPointRef;
         const { time: x2, price: y2 } = secondPointRef;
         const slope = (y2 - y1) / (x2 - x1);
@@ -28,6 +28,7 @@ function RayLine(chartRef : React.RefObject<IChartApi> , candlestickSeriesRef : 
 
         const trendLine = new TrendLine(chartRef.current, candlestickSeriesRef.current, firstPointRef, point2, { showLabels: options?.showLabels  });
         chartRef.current.panes()[0].attachPrimitive(trendLine);
+        return trendLine;
     }
 
     return {drawRayLine}
