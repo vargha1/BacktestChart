@@ -1,4 +1,3 @@
-//BitmapCoordinatesRenderingScope
 import {
   CanvasRenderingTarget2D,
   BitmapCoordinatesRenderingScope,
@@ -17,147 +16,19 @@ import {
   Time,
 } from "lightweight-charts";
 
-class TrendLinePaneRenderer implements IPrimitivePaneRenderer {
-  _p1: ViewPoint;
-  _p2: ViewPoint;
-  _text1: string;
-  _text2: string;
-  _options: TrendLineOptions;
-
-  constructor(
-    p1: ViewPoint,
-    p2: ViewPoint,
-    text1: string,
-    text2: string,
-    options: TrendLineOptions
-  ) {
-    this._p1 = p1;
-    this._p2 = p2;
-    this._text1 = text1;
-    this._text2 = text2;
-    this._options = options;
-  }
-
-  draw(target: CanvasRenderingTarget2D) {
-    target.useBitmapCoordinateSpace((scope) => {
-      if (
-        this._p1.x === null ||
-        this._p1.y === null ||
-        this._p2.x === null ||
-        this._p2.y === null
-      )
-        return;
-      const ctx = scope.context;
-      const x1Scaled = Math.round(this._p1.x * scope.horizontalPixelRatio);
-      const y1Scaled = Math.round(this._p1.y * scope.verticalPixelRatio);
-      const x2Scaled = Math.round(this._p2.x * scope.horizontalPixelRatio);
-      const y2Scaled = Math.round(this._p2.y * scope.verticalPixelRatio);
-      ctx.lineWidth = this._options.width;
-      ctx.strokeStyle = this._options.lineColor;
-      if (this._options.lineStyle === "dashed") {
-        ctx.setLineDash([10, 3]); // Dash pattern: 10px line, 5px gap
-      } else {
-        ctx.setLineDash([]); // Solid line
-      }
-      ctx.beginPath();
-      ctx.moveTo(x1Scaled, y1Scaled);
-      ctx.lineTo(x2Scaled, y2Scaled);
-      ctx.stroke();
-      if (this._options.showLabels) {
-        const midX = (x1Scaled + x2Scaled) / 2;
-        const midY = (y1Scaled + y2Scaled) / 2 - 20;
-        const labelText = ``;
-        this._drawCenterLabel(scope, labelText, midX, midY);
-        // this._drawTextLabel(scope, this._text1, x1Scaled, y1Scaled, true);
-        // this._drawTextLabel(scope, this._text2, x2Scaled, y2Scaled, false);
-      }
-    });
-  }
-  //label info
-  // _drawTextLabel(scope: BitmapCoordinatesRenderingScope, text: string, x: number, y: number, left: boolean) {
-  // 	scope.context.font = '24px Arial';
-  // 	scope.context.beginPath();
-  // 	const offset = 5 * scope.horizontalPixelRatio;
-  // 	const textWidth = scope.context.measureText(text);
-  // 	const leftAdjustment = left ? textWidth.width + offset * 4 : 0;
-  // 	scope.context.fillStyle = this._options.labelBackgroundColor;
-  // 	scope.context.roundRect(x + offset - leftAdjustment, y - 24, textWidth.width + offset * 2,  24 + offset, 5);
-  // 	scope.context.fill();
-  // 	scope.context.beginPath();
-  // 	scope.context.fillStyle = this._options.labelTextColor;
-  // 	scope.context.fillText(text, x + offset * 2 - leftAdjustment, y);
-  // }
-  _drawCenterLabel(
-    scope: BitmapCoordinatesRenderingScope,
-    text: string,
-    x: number,
-    y: number
-  ) {
-    scope.context.font = "13px Arial";
-    const offset = 5 * scope.horizontalPixelRatio;
-    const textWidth = scope.context.measureText(text).width;
-
-    const bgX = x - textWidth / 2 - offset;
-    const bgY = y - 24 - offset;
-    const bgWidth = textWidth + offset * 2;
-    const bgHeight = 24 + offset;
-
-    scope.context.fillStyle = this._options.labelBackgroundColor;
-    scope.context.beginPath();
-    scope.context.roundRect(bgX, bgY, bgWidth, bgHeight, 5);
-    scope.context.fill();
-
-    scope.context.fillStyle = this._options.labelTextColor;
-    scope.context.fillText(text, x - textWidth / 2, y - 5);
-  }
-}
+// ============================================================================
+// TYPES
+// ============================================================================
 
 interface ViewPoint {
   x: Coordinate | null;
   y: Coordinate | null;
 }
 
-class TrendLinePaneView implements IPrimitivePaneView {
-  _source: TrendLine;
-  _p1: ViewPoint = { x: null, y: null };
-  _p2: ViewPoint = { x: null, y: null };
-
-  constructor(source: TrendLine) {
-    this._source = source;
-  }
-
-  update() {
-    const series = this._source._series;
-    const y1 = series.priceToCoordinate(this._source._p1.price);
-    const y2 = series.priceToCoordinate(this._source._p2.price);
-    const timeScale = this._source._chart.timeScale();
-    const x1 =
-      typeof this._source._p1.logical === "number"
-        ? timeScale.logicalToCoordinate(this._source._p1.logical as Logical)
-        : timeScale.timeToCoordinate(this._source._p1.time);
-    const x2 =
-      typeof this._source._p2.logical === "number"
-        ? timeScale.logicalToCoordinate(this._source._p2.logical as Logical)
-        : timeScale.timeToCoordinate(this._source._p2.time);
-    this._p1 = { x: x1, y: y1 };
-    this._p2 = { x: x2, y: y2 };
-  }
-
-  renderer() {
-    return new TrendLinePaneRenderer(
-      this._p1,
-      this._p2,
-      "" + this._source._p1.price.toFixed(1),
-      "" + this._source._p2.price.toFixed(1),
-      this._source._options
-    );
-  }
-}
-
 interface Point {
   time: Time;
   price: number;
-  logical?: number; // optional logical index for out-of-range placement
+  logical?: number;
 }
 
 export interface TrendLineOptions {
@@ -169,7 +40,7 @@ export interface TrendLineOptions {
   lineStyle: "solid" | "dashed";
 }
 
-const defaultOptions: TrendLineOptions = {
+const DEFAULT_OPTIONS: TrendLineOptions = {
   lineColor: "#FFFFFF",
   width: 3,
   showLabels: true,
@@ -178,6 +49,254 @@ const defaultOptions: TrendLineOptions = {
   lineStyle: "solid",
 };
 
+// ============================================================================
+// COORDINATE HELPER
+// ============================================================================
+
+class CoordinateHelper {
+  constructor(
+    private chart: IChartApi,
+    private series: ISeriesApi<keyof SeriesOptionsMap>
+  ) {}
+
+  getX(point: Point): Coordinate | null {
+    const ts = this.chart.timeScale();
+
+    // Prefer logical coordinate
+    if (typeof point.logical === "number") {
+      return ts.logicalToCoordinate(point.logical as Logical);
+    }
+
+    // Fallback to time
+    return ts.timeToCoordinate(point.time);
+  }
+
+  getY(price: number): Coordinate | null {
+    return this.series.priceToCoordinate(price);
+  }
+
+  getLogicalIndex(point: Point): number | null {
+    const ts = this.chart.timeScale();
+
+    const x = this.getX(point);
+    if (x === null) return null;
+
+    const logical = ts.coordinateToLogical(x);
+    return typeof logical === "number" ? logical : null;
+  }
+}
+
+// ============================================================================
+// RENDERER
+// ============================================================================
+
+class TrendLinePaneRenderer implements IPrimitivePaneRenderer {
+  constructor(
+    private p1: ViewPoint,
+    private p2: ViewPoint,
+    private text1: string,
+    private text2: string,
+    private options: TrendLineOptions
+  ) {}
+
+  draw(target: CanvasRenderingTarget2D) {
+    target.useBitmapCoordinateSpace((scope) => {
+      if (
+        this.p1.x === null ||
+        this.p1.y === null ||
+        this.p2.x === null ||
+        this.p2.y === null
+      ) {
+        return;
+      }
+
+      const renderer = new BitmapLineRenderer(
+        scope,
+        this.p1,
+        this.p2,
+        this.options
+      );
+
+      renderer.drawLine();
+
+      if (this.options.showLabels) {
+        renderer.drawLabels(this.text1, this.text2);
+      }
+    });
+  }
+}
+
+class BitmapLineRenderer {
+  private ctx: CanvasRenderingContext2D;
+  private x1: number;
+  private y1: number;
+  private x2: number;
+  private y2: number;
+
+  constructor(
+    private scope: BitmapCoordinatesRenderingScope,
+    p1: ViewPoint,
+    p2: ViewPoint,
+    private options: TrendLineOptions
+  ) {
+    this.ctx = scope.context;
+    this.x1 = Math.round(p1.x! * scope.horizontalPixelRatio);
+    this.y1 = Math.round(p1.y! * scope.verticalPixelRatio);
+    this.x2 = Math.round(p2.x! * scope.horizontalPixelRatio);
+    this.y2 = Math.round(p2.y! * scope.verticalPixelRatio);
+  }
+
+  drawLine() {
+    this.ctx.lineWidth = this.options.width;
+    this.ctx.strokeStyle = this.options.lineColor;
+
+    // Set line style
+    if (this.options.lineStyle === "dashed") {
+      this.ctx.setLineDash([10, 3]);
+    } else {
+      this.ctx.setLineDash([]);
+    }
+
+    this.ctx.beginPath();
+    this.ctx.moveTo(this.x1, this.y1);
+    this.ctx.lineTo(this.x2, this.y2);
+    this.ctx.stroke();
+
+    // Reset line dash
+    this.ctx.setLineDash([]);
+  }
+
+  drawLabels(text1: string, text2: string) {
+    const midX = (this.x1 + this.x2) / 2;
+    const midY = (this.y1 + this.y2) / 2 - 20;
+
+    this.drawCenterLabel("", midX, midY);
+  }
+
+  private drawCenterLabel(text: string, x: number, y: number) {
+    this.ctx.font = "13px Arial";
+    const offset = 5 * this.scope.horizontalPixelRatio;
+    const textWidth = this.ctx.measureText(text).width;
+
+    const bgX = x - textWidth / 2 - offset;
+    const bgY = y - 24 - offset;
+    const bgWidth = textWidth + offset * 2;
+    const bgHeight = 24 + offset;
+
+    // Draw background
+    this.ctx.fillStyle = this.options.labelBackgroundColor;
+    this.ctx.beginPath();
+    this.ctx.roundRect(bgX, bgY, bgWidth, bgHeight, 5);
+    this.ctx.fill();
+
+    // Draw text
+    this.ctx.fillStyle = this.options.labelTextColor;
+    this.ctx.fillText(text, x - textWidth / 2, y - 5);
+  }
+}
+
+// ============================================================================
+// VIEW
+// ============================================================================
+
+class TrendLinePaneView implements IPrimitivePaneView {
+  private p1: ViewPoint = { x: null, y: null };
+  private p2: ViewPoint = { x: null, y: null };
+
+  constructor(private source: TrendLine) {}
+
+  update() {
+    const helper = new CoordinateHelper(
+      this.source._chart,
+      this.source._series
+    );
+
+    this.p1 = {
+      x: helper.getX(this.source._p1),
+      y: helper.getY(this.source._p1.price),
+    };
+
+    this.p2 = {
+      x: helper.getX(this.source._p2),
+      y: helper.getY(this.source._p2.price),
+    };
+  }
+
+  renderer(): IPrimitivePaneRenderer {
+    return new TrendLinePaneRenderer(
+      this.p1,
+      this.p2,
+      this.source._p1.price.toFixed(1),
+      this.source._p2.price.toFixed(1),
+      this.source._options
+    );
+  }
+}
+
+// ============================================================================
+// HIT TESTER
+// ============================================================================
+
+class HitTester {
+  constructor(private tolerance: number = 8) {}
+
+  test(
+    px: number,
+    py: number,
+    x1: number | null,
+    y1: number | null,
+    x2: number | null,
+    y2: number | null
+  ): boolean | "p1" | "p2" {
+    if (x1 === null || y1 === null || x2 === null || y2 === null) {
+      return false;
+    }
+
+    // Check endpoints first
+    const distP1 = this.distance(px, py, x1, y1);
+    if (distP1 <= this.tolerance) return "p1";
+
+    const distP2 = this.distance(px, py, x2, y2);
+    if (distP2 <= this.tolerance) return "p2";
+
+    // Check line body
+    return this.isPointNearLine(px, py, x1, y1, x2, y2);
+  }
+
+  private distance(x1: number, y1: number, x2: number, y2: number): number {
+    return Math.hypot(x2 - x1, y2 - y1);
+  }
+
+  private isPointNearLine(
+    px: number,
+    py: number,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number
+  ): boolean {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len2 = dx * dx + dy * dy;
+
+    if (len2 === 0) return false;
+
+    // Project point onto line segment
+    let t = ((px - x1) * dx + (py - y1) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+
+    const closestX = x1 + t * dx;
+    const closestY = y1 + t * dy;
+
+    const dist = this.distance(px, py, closestX, closestY);
+    return dist <= this.tolerance;
+  }
+}
+
+// ============================================================================
+// MAIN CLASS
+// ============================================================================
+
 export class TrendLine implements ISeriesPrimitive<Time> {
   _chart: IChartApi;
   _series: ISeriesApi<keyof SeriesOptionsMap>;
@@ -185,8 +304,10 @@ export class TrendLine implements ISeriesPrimitive<Time> {
   _p2: Point;
   _paneViews: TrendLinePaneView[];
   _options: TrendLineOptions;
-  _minPrice: number;
-  _maxPrice: number;
+  _minPrice: number = 0;
+  _maxPrice: number = 0;
+  private helper: CoordinateHelper;
+  private hitTester: HitTester;
 
   constructor(
     chart: IChartApi,
@@ -199,23 +320,38 @@ export class TrendLine implements ISeriesPrimitive<Time> {
     this._series = series;
     this._p1 = p1;
     this._p2 = p2;
+    this._options = { ...DEFAULT_OPTIONS, ...options };
+    this._paneViews = [new TrendLinePaneView(this)];
+
+    this.helper = new CoordinateHelper(chart, series);
+    this.hitTester = new HitTester(8);
+
+    this.updatePriceRange();
+  }
+
+  private updatePriceRange() {
     this._minPrice = Math.min(this._p1.price, this._p2.price);
     this._maxPrice = Math.max(this._p1.price, this._p2.price);
-    this._options = {
-      ...defaultOptions,
-      ...options,
-    };
-    this._paneViews = [new TrendLinePaneView(this)];
+  }
+
+  paneViews() {
+    return this._paneViews;
+  }
+
+  updateAllViews() {
+    this._paneViews.forEach((view) => view.update());
   }
 
   autoscaleInfo(
     startTimePoint: Logical,
     endTimePoint: Logical
   ): AutoscaleInfo | null {
-    const p1Index = this._pointIndex(this._p1);
-    const p2Index = this._pointIndex(this._p2);
+    const p1Index = this.helper.getLogicalIndex(this._p1);
+    const p2Index = this.helper.getLogicalIndex(this._p2);
+
     if (p1Index === null || p2Index === null) return null;
     if (endTimePoint < p1Index || startTimePoint > p2Index) return null;
+
     return {
       priceRange: {
         minValue: this._minPrice,
@@ -224,82 +360,34 @@ export class TrendLine implements ISeriesPrimitive<Time> {
     };
   }
 
-  updateAllViews() {
-    this._paneViews.forEach((pw) => pw.update());
-  }
-
-  paneViews() {
-    return this._paneViews;
-  }
-
-  _pointIndex(p: Point): number | null {
-    const ts = this._chart.timeScale();
-    const coordinate =
-      typeof p.logical === "number"
-        ? ts.logicalToCoordinate(p.logical as Logical)
-        : ts.timeToCoordinate(p.time);
-    if (coordinate === null) return null;
-    const index = ts.coordinateToLogical(coordinate);
-    return index;
-  }
-
-  // Compute current screen coordinates of the two points
   screenPoints(): {
     x1: number | null;
     y1: number | null;
     x2: number | null;
     y2: number | null;
   } {
-    const y1 = this._series.priceToCoordinate(this._p1.price);
-    const y2 = this._series.priceToCoordinate(this._p2.price);
-    const ts = this._chart.timeScale();
-    const x1 =
-      typeof this._p1.logical === "number"
-        ? ts.logicalToCoordinate(this._p1.logical as Logical)
-        : ts.timeToCoordinate(this._p1.time as any);
-    const x2 =
-      typeof this._p2.logical === "number"
-        ? ts.logicalToCoordinate(this._p2.logical as Logical)
-        : ts.timeToCoordinate(this._p2.time as any);
-    return { x1, y1, x2, y2 };
+    return {
+      x1: this.helper.getX(this._p1),
+      y1: this.helper.getY(this._p1.price),
+      x2: this.helper.getX(this._p2),
+      y2: this.helper.getY(this._p2.price),
+    };
   }
 
-  // Simple hit test: distance from point to line segment <= tolerance pixels
   isHit(px: number, py: number, tolerance = 8): boolean | "p1" | "p2" {
     const { x1, y1, x2, y2 } = this.screenPoints();
-    if (x1 === null || y1 === null || x2 === null || y2 === null) return false;
-
-    // check endpoints first (p1)
-    const distP1 = Math.hypot(px - x1, py - y1);
-    if (distP1 <= tolerance) return "p1";
-    const distP2 = Math.hypot(px - x2, py - y2);
-    if (distP2 <= tolerance) return "p2";
-
-    // then check body
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const len2 = dx * dx + dy * dy;
-    if (len2 === 0) return false;
-    let t = ((px - x1) * dx + (py - y1) * dy) / len2;
-    t = Math.max(0, Math.min(1, t));
-    const cx = x1 + t * dx;
-    const cy = y1 + t * dy;
-    const dist = Math.hypot(px - cx, py - cy);
-    return dist <= tolerance;
+    return this.hitTester.test(px, py, x1, y1, x2, y2);
   }
 
-  // allow external move of endpoints
   setP1(pt: Point) {
     this._p1 = pt;
-    this._minPrice = Math.min(this._p1.price, this._p2.price);
-    this._maxPrice = Math.max(this._p1.price, this._p2.price);
+    this.updatePriceRange();
     this.updateAllViews();
   }
 
   setP2(pt: Point) {
     this._p2 = pt;
-    this._minPrice = Math.min(this._p1.price, this._p2.price);
-    this._maxPrice = Math.max(this._p1.price, this._p2.price);
+    this.updatePriceRange();
     this.updateAllViews();
   }
 

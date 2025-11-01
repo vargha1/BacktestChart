@@ -14,6 +14,7 @@ import {
   SeriesType,
   Time,
   Coordinate,
+  UTCTimestamp,
 } from "lightweight-charts";
 
 type Price = number;
@@ -27,13 +28,11 @@ export interface PositionOptions {
   slColor: string;
   lineColor: string;
   width: number;
-  // preferred: horizontal band width in bars (logical units)
   bandBars?: number;
-  // legacy: band width in chart coordinates (pixels) - deprecated; will be converted on first render
-  bandWidth?: number;
+  bandWidth?: number; // deprecated - for backward compatibility
 }
 
-const defaultOptions: PositionOptions = {
+const DEFAULT_OPTIONS: PositionOptions = {
   side: "long",
   entryColor: "#8888ff55",
   tpColor: "#2ecc7055",
@@ -49,468 +48,600 @@ export interface PositionPoint {
   price: Price;
 }
 
-class PositionPaneRenderer implements IPrimitivePaneRenderer {
-  _view: PositionPaneView;
-  constructor(view: PositionPaneView) {
-    this._view = view;
-  }
-  draw(target: CanvasRenderingTarget2D) {
-    const v = this._view;
-    const { entryX, entryY, tpY, slY } = v._coords;
-    if (entryX == null || entryY == null || tpY == null || slY == null) return;
-    target.useBitmapCoordinateSpace(
-      (scope: BitmapCoordinatesRenderingScope) => {
-        const ctx = scope.context;
-        const x = Math.round(entryX * scope.horizontalPixelRatio);
-        const yEntry = Math.round(entryY * scope.verticalPixelRatio);
-        const yTp = Math.round(tpY * scope.verticalPixelRatio);
-        const ySl = Math.round(slY * scope.verticalPixelRatio);
+interface RenderCoordinates {
+  entryX: Coordinate | null;
+  entryY: Coordinate | null;
+  tpY: Coordinate | null;
+  slY: Coordinate | null;
+  hitPriceY: Coordinate | null;
+}
 
-        // Determine horizontal extent: from entryX to either hitTime coordinate or right edge
-        const src = v._source as any;
-        const ts = src._chart.timeScale();
-        let rightX = Math.round(scope.bitmapSize.width); // default right edge
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
 
-        // Determine desired band device width from bandBars (logical units)
-        // Fallback: if legacy bandWidth exists without bandBars, approximate bars using current scale
-        const tsForBars = v._source._chart.timeScale();
-        let entryLogicalForBars: number | null = null;
-        try {
-          entryLogicalForBars =
-            typeof (v._source as any)._entry?.logical === "number"
-              ? ((v._source as any)._entry.logical as number)
-              : (tsForBars.coordinateToLogical(entryX as any) as number | null);
-        } catch {}
-        const bandBars =
-          (v._options as any).bandBars ??
-          ((): number => {
-            // approximate from legacy pixel width if present
-            const legacyPx = (v._options as any).bandWidth as number | undefined;
-            if (
-              legacyPx != null &&
-              entryLogicalForBars != null &&
-              typeof entryLogicalForBars === "number"
-            ) {
-              try {
-                const toCoord = (lg: number) => tsForBars.logicalToCoordinate(lg as any) ?? 0;
-                // find how many bars correspond to legacyPx (CSS px)
-                const entryCssX = entryX as number;
-                // scan a small range to estimate bar width in px
-                const pxPerBar = (() => {
-                  const c0 = toCoord(entryLogicalForBars);
-                  const c1 = toCoord(entryLogicalForBars + 1);
-                  const d = c1 != null && c0 != null ? Math.abs((c1 as number) - (c0 as number)) : 10;
-                  return d || 10;
-                })();
-                const estBars = Math.max(1, Math.round(legacyPx / pxPerBar));
-                // persist conversion so future renders use bars
-                (v._source as any).updateOptions?.({ bandBars: estBars, bandWidth: undefined });
-                return estBars;
-              } catch {}
-            }
-            return 30;
-          })();
-        // convert bandBars to device pixels
-        let desiredBandDevice = Math.round(24 * scope.horizontalPixelRatio); // min default
-        try {
-          if (
-            entryLogicalForBars != null &&
-            typeof entryLogicalForBars === "number" &&
-            typeof bandBars === "number"
-          ) {
-            const targetLogical = entryLogicalForBars + bandBars;
-            const targetCssX = tsForBars.logicalToCoordinate(targetLogical as any) as number | null;
-            if (targetCssX != null) {
-              const cssDelta = Math.max(0, (targetCssX as number) - (entryX as number));
-              desiredBandDevice = Math.max(8, Math.round(cssDelta * scope.horizontalPixelRatio));
-            }
-          }
-        } catch {}
+class CoordinateConverter {
+  constructor(private chart: IChartApi) {}
 
-        // compute hit coordinate robustly from stored _hitTime (no more cached _hitCoord)
-        const computeHitDeviceX = (): number | null => {
-          // prefer a stored logical index (stable) if available - this is the most reliable
-          if (typeof src._hitLogical === "number") {
-            try {
-              const lg = src._hitLogical as number;
-              // Convert logical directly to coordinate
-              const c = ts.logicalToCoordinate(lg as any);
-              if (typeof c === "number" && !isNaN(c) && isFinite(c)) {
-                // Successfully mapped - return in device pixels
-                return Math.round(c * scope.horizontalPixelRatio);
-              }
-              // Try with rounding variations if direct mapping failed
-              const tryLg = (testLg: number) => {
-                try {
-                  const testC = ts.logicalToCoordinate(testLg as any);
-                  if (typeof testC === "number" && !isNaN(testC) && isFinite(testC)) {
-                    return testC;
-                  }
-                } catch {
-                  // ignore
-                }
-                return null;
-              };
-              let c2 = tryLg(Math.round(lg));
-              if (c2 == null) c2 = tryLg(Math.floor(lg));
-              if (c2 == null) c2 = tryLg(Math.ceil(lg));
-              if (c2 != null) return Math.round(c2 * scope.horizontalPixelRatio);
-            } catch (err) {
-              // eslint-disable-next-line no-console
-              console.debug("computeHitDeviceX from logical failed:", err, { hitLogical: src._hitLogical });
-            }
-          }
-          // Some code paths may have stored a logical index in _hitTime directly.
-          // Try interpreting numeric _hitTime as a logical index and map it.
-          if (src._hitTime != null && typeof src._hitTime === "number") {
-            try {
-              const maybeLogical = src._hitTime as number;
-              const vr = (ts as any).visibleLogicalRange?.() ?? null;
-              let lg = maybeLogical;
-              if (
-                vr &&
-                typeof vr.from === "number" &&
-                typeof vr.to === "number"
-              ) {
-                if (lg < vr.from) lg = vr.from;
-                if (lg > vr.to) lg = vr.to;
-              }
-              const c = ts.logicalToCoordinate(lg as any);
-              if (typeof c === "number")
-                return Math.round(c * scope.horizontalPixelRatio);
-            } catch {}
-          }
-          if (!src._hitTime) return null;
-          const tryConvert = (t: any) => {
-            try {
-              const c = ts.timeToCoordinate(t as any);
-              return typeof c === "number" ? c : null;
-            } catch {
-              return null;
-            }
-          };
-          // try as-is
-          let hitCoord = tryConvert(src._hitTime);
-          // if numeric and looks like ms, try dividing by 1000
-          if (hitCoord == null && typeof src._hitTime === "number") {
-            const maybeMs = Math.floor(src._hitTime as number);
-            if (maybeMs > 1e12) {
-              hitCoord = tryConvert(Math.floor(maybeMs / 1000));
-            }
-            // some feeds may provide seconds but as float; also try *1000 fallback
-            if (hitCoord == null && maybeMs < 1e12) {
-              try {
-                hitCoord = tryConvert(Math.floor(maybeMs * 1000));
-              } catch {}
-            }
-          }
-          // some sources may wrap time in an object; try common patterns
-          if (
-            hitCoord == null &&
-            src._hitTime &&
-            typeof src._hitTime === "object"
-          ) {
-            const tobj: any = src._hitTime;
-            if (typeof tobj.time === "number") hitCoord = tryConvert(tobj.time);
-            else if (typeof tobj.timestamp === "number")
-              hitCoord = tryConvert(tobj.timestamp);
-            else {
-              // try common nested patterns like {t: ...}
-              if (typeof tobj.t === "number") hitCoord = tryConvert(tobj.t);
-            }
-          }
-          if (hitCoord != null)
-            return Math.round(hitCoord * scope.horizontalPixelRatio);
-          // If we couldn't map the hit by time/logical but the source reports a hit,
-          // return the band's right device X so the arrow remains bound to the position.
-          if ((src as any)._hit) {
-            return Math.round(x + desiredBandDevice);
-          }
-          return null;
-        };
-        const computedHitDeviceX = computeHitDeviceX();
-        
-        // Debug: Log if we have a hit but can't compute the coordinate
-        if ((v._source as any)._hit && computedHitDeviceX == null) {
-          // eslint-disable-next-line no-console
-          console.debug("Hit exists but computedHitDeviceX is null", {
-            hit: (v._source as any)._hit,
-            hitTime: src._hitTime,
-            hitLogical: src._hitLogical,
-            entryX: x,
-            entryLogical: src._entry?.logical,
-          });
-        }
-        
-        if (computedHitDeviceX != null) {
-          rightX = computedHitDeviceX;
-        } else if ((v._source as any)._hit) {
-          // If hit exists but couldn't map to a time coordinate, clamp the rightX
-          // to the band's device right edge so the arrow stays visually bound.
-          const bandRight = Math.round(x + desiredBandDevice);
-          rightX = Math.min(bandRight, Math.round(scope.bitmapSize.width));
-        }
-        // debug: if hit exists but we didn't get a computed hit coord, log useful info
-        if ((v._source as any)._hit && computedHitDeviceX == null) {
-          try {
-            // eslint-disable-next-line no-console
-            console.debug("PositionTool renderer fallback", {
-              hit: (v._source as any)._hit,
-              hitTime: (v._source as any)._hitTime,
-              hitLogical: (v._source as any)._hitLogical,
-              entry: (v._source as any)._entry,
-              entryX: entryX,
-              desiredBandDevice,
-              rightX,
-            });
-          } catch {}
+  timeToCoordinate(time: Time | undefined): Coordinate | null {
+    if (!time) return null;
+    try {
+      const ts = this.chart.timeScale();
+      let timeValue = time;
+
+      // Handle numeric time values (could be seconds or milliseconds)
+      if (typeof time === "number") {
+        if (time > 1e12) {
+          timeValue = Math.floor(time / 1000) as UTCTimestamp;
         } else {
-          try {
-            // eslint-disable-next-line no-console
-            console.debug(
-              "PositionTool renderer: hitTime not mapped to device X",
-              {
-                hitTime: src._hitTime,
-                entryLogical: src._entry?.logical,
-                entryTime: src._entry?.time,
-                rightXFallback: rightX,
-              }
-            );
-          } catch {}
+          timeValue = Math.floor(time) as UTCTimestamp;
         }
-
-        // Ensure we never draw the band beyond the desired band device width
-        rightX = Math.min(rightX, Math.round(x + desiredBandDevice));
-        // draw shaded band from entry to rightX, with two colors for TP/SL zones vertically
-        const available = Math.max(0, rightX - x);
-        const bandWidth = Math.max(8, Math.min(desiredBandDevice, available));
-        // draw TP area (between entry and tp price)
-        ctx.fillStyle = v._options.tpColor;
-        const topTp = Math.min(yEntry, yTp);
-        const heightTp = Math.abs(yTp - yEntry);
-        ctx.fillRect(x, topTp, bandWidth, heightTp);
-        // draw SL area
-        ctx.fillStyle = v._options.slColor;
-        const topSl = Math.min(yEntry, ySl);
-        const heightSl = Math.abs(ySl - yEntry);
-        ctx.fillRect(x, topSl, bandWidth, heightSl);
-
-        // =====================================================================
-        // ARROW LOGIC: Point from entry towards the nearest target (TP or SL)
-        // =====================================================================
-        ctx.strokeStyle = v._options.lineColor;
-        ctx.lineWidth = 2;
-        ctx.setLineDash([8, 6]);
-
-        const source = v._source as any;
-        const entryPrice = source._entry?.price as number;
-        const tpPrice = source._tp as number;
-        const slPrice = source._sl as number;
-        const side = source._options?.side as PositionSide;
-        const hasHit = source._hit === "tp" || source._hit === "sl";
-        const lastClose = source._lastClose as number | undefined;
-
-        // Step 1: Determine which target the arrow should point to (TP or SL)
-        let targetPrice: number;
-        let targetY: number;
-        let targetLabel: string;
-
-        if (hasHit) {
-          // If hit occurred, arrow points to the hit target
-          if (source._hit === "tp") {
-            targetPrice = tpPrice;
-            targetY = yTp;
-            targetLabel = "TP";
-          } else {
-            targetPrice = slPrice;
-            targetY = ySl;
-            targetLabel = "SL";
-          }
-        } else {
-          // No hit yet: point based on price movement direction relative to entry
-          // For LONG: if price >= entry, point to TP (price moving up), else SL (price moving down)
-          // For SHORT: if price <= entry, point to TP (price moving down), else SL (price moving up)
-          const referencePrice = typeof lastClose === "number" ? lastClose : entryPrice;
-
-          if (typeof referencePrice === "number" && typeof entryPrice === "number") {
-            if (side === "long") {
-              // Long position: TP is above entry, SL is below entry
-              // If current price >= entry, we're moving toward TP
-              if (referencePrice >= entryPrice) {
-                targetPrice = tpPrice;
-                targetY = yTp;
-                targetLabel = "TP";
-              } else {
-                targetPrice = slPrice;
-                targetY = ySl;
-                targetLabel = "SL";
-              }
-            } else {
-              // Short position: TP is below entry, SL is above entry
-              // If current price <= entry, we're moving toward TP
-              if (referencePrice <= entryPrice) {
-                targetPrice = tpPrice;
-                targetY = yTp;
-                targetLabel = "TP";
-              } else {
-                targetPrice = slPrice;
-                targetY = ySl;
-                targetLabel = "SL";
-              }
-            }
-          } else {
-            // Fallback: use TP as default
-            targetPrice = tpPrice;
-            targetY = yTp;
-            targetLabel = "TP";
-          }
-        }
-
-        // Step 2: Determine arrow endpoint X coordinate
-        // The arrow extends horizontally from entry, pointing toward the target line
-        let arrowXEnd: number;
-
-        if (hasHit && computedHitDeviceX != null) {
-          // Hit occurred and we can map it: arrow points to the exact hit candle
-          arrowXEnd = computedHitDeviceX;
-          // Ensure arrow doesn't start before entry
-          arrowXEnd = Math.max(x + Math.round(8 * scope.horizontalPixelRatio), arrowXEnd);
-        } else if (hasHit && computedHitDeviceX == null) {
-          // Hit occurred but off-screen: point to band right edge with indicator
-          const bandRightDevice = Math.round(x + desiredBandDevice);
-          arrowXEnd = Math.min(bandRightDevice, Math.round(scope.bitmapSize.width) - Math.round(24 * scope.horizontalPixelRatio));
-          
-          // Draw off-screen indicator
-          const indicatorSize = 8 * scope.horizontalPixelRatio;
-          ctx.fillStyle = v._options.lineColor;
-          ctx.beginPath();
-          ctx.moveTo(arrowXEnd, targetY);
-          ctx.lineTo(arrowXEnd - indicatorSize, targetY - indicatorSize / 2);
-          ctx.lineTo(arrowXEnd - indicatorSize, targetY + indicatorSize / 2);
-          ctx.closePath();
-          ctx.fill();
-
-          // Draw label
-          ctx.fillStyle = "#fff";
-          ctx.font = `${10 * scope.horizontalPixelRatio}px Arial`;
-          const label = `${targetLabel} (off-screen)`;
-          const labelWidth = ctx.measureText(label).width;
-          ctx.fillText(
-            label,
-            arrowXEnd - indicatorSize - labelWidth - Math.round(6 * scope.horizontalPixelRatio),
-            targetY - Math.round(10 * scope.verticalPixelRatio)
-          );
-        } else {
-          // No hit yet: arrow extends to the right edge of the band
-          // The band right edge is determined by bandBars, converted to device pixels
-          // Arrow should point at the target line at the band's right edge
-          arrowXEnd = Math.round(x + desiredBandDevice);
-          // Ensure arrow extends at least a minimum distance from entry
-          const minArrowLength = Math.round(24 * scope.horizontalPixelRatio);
-          arrowXEnd = Math.max(x + minArrowLength, arrowXEnd);
-          // Don't let arrow extend beyond the visible chart
-          arrowXEnd = Math.min(arrowXEnd, Math.round(scope.bitmapSize.width) - Math.round(12 * scope.horizontalPixelRatio));
-        }
-
-        // Step 3: Draw the arrow line from entry to target
-        ctx.beginPath();
-        ctx.moveTo(x, yEntry);
-        ctx.lineTo(arrowXEnd, targetY);
-        ctx.stroke();
-        ctx.setLineDash([]);
-
-        // Step 4: Draw arrowhead pointing to the target
-        const headSize = 6 * scope.horizontalPixelRatio;
-        const dx = arrowXEnd - x;
-        const dy = targetY - yEntry;
-        const angle = Math.atan2(dy, dx);
-
-        ctx.fillStyle = v._options.lineColor;
-        ctx.beginPath();
-        ctx.moveTo(arrowXEnd, targetY);
-        ctx.lineTo(
-          arrowXEnd - headSize * Math.cos(angle - Math.PI / 6),
-          targetY - headSize * Math.sin(angle - Math.PI / 6)
-        );
-        ctx.lineTo(
-          arrowXEnd - headSize * Math.cos(angle + Math.PI / 6),
-          targetY - headSize * Math.sin(angle + Math.PI / 6)
-        );
-        ctx.closePath();
-        ctx.fill();
-        // borders (horizontal lines)
-        ctx.strokeStyle = v._options.lineColor;
-        ctx.lineWidth = v._options.width;
-        ctx.beginPath();
-        ctx.moveTo(x, yEntry);
-        ctx.lineTo(x + bandWidth, yEntry);
-        ctx.moveTo(x, yTp);
-        ctx.lineTo(x + bandWidth, yTp);
-        ctx.moveTo(x, ySl);
-        ctx.lineTo(x + bandWidth, ySl);
-        ctx.stroke();
-        // labels with simple P/L and R:R box
-        ctx.fillStyle = "#ffffff";
-        ctx.font = `${12 * scope.horizontalPixelRatio}px Arial`;
-        const plPerc = v._source._plPercent().toFixed(2) + "%";
-        ctx.fillText(plPerc, x + 8, yEntry - 8);
-        // R:R box
-        try {
-          const entry = v._source._entry.price;
-          const tp = v._source._tp;
-          const sl = v._source._sl;
-          const risk = Math.abs(entry - sl);
-          const reward = Math.abs(tp - entry);
-          const rr = risk > 0 ? (reward / risk).toFixed(2) : "-";
-          const label = `R:R ${rr}`;
-          const m = ctx.measureText(label);
-          const pad = 6 * scope.horizontalPixelRatio;
-          const boxW = m.width + pad * 2;
-          const boxH = 18 * scope.verticalPixelRatio;
-          ctx.fillStyle = "rgba(0,0,0,0.6)";
-          ctx.fillRect(x + bandWidth - boxW - 8, yEntry - boxH - 8, boxW, boxH);
-          ctx.fillStyle = "#fff";
-          ctx.fillText(
-            label,
-            x + bandWidth - boxW - 8 + pad,
-            yEntry - 8 + boxH / 2 - 4
-          );
-        } catch {}
       }
-    );
+
+      return ts.timeToCoordinate(timeValue as any);
+    } catch {
+      return null;
+    }
+  }
+
+  logicalToCoordinate(logical: number | undefined): Coordinate | null {
+    if (typeof logical !== "number") return null;
+    try {
+      return this.chart.timeScale().logicalToCoordinate(logical as Logical);
+    } catch {
+      return null;
+    }
+  }
+
+  coordinateToLogical(coord: Coordinate): number | null {
+    try {
+      const result = this.chart.timeScale().coordinateToLogical(coord as any);
+      return typeof result === "number" ? result : null;
+    } catch {
+      return null;
+    }
+  }
+
+  coordinateToTime(coord: Coordinate): Time | null {
+    try {
+      return this.chart.timeScale().coordinateToTime(coord as any);
+    } catch {
+      return null;
+    }
   }
 }
 
+class BandWidthCalculator {
+  constructor(
+    private chart: IChartApi,
+    private converter: CoordinateConverter
+  ) {}
+
+  calculateDeviceWidth(
+    entryX: number,
+    entryLogical: number | null,
+    bandBars: number,
+    scope: BitmapCoordinatesRenderingScope
+  ): number {
+    const MIN_WIDTH = 8;
+    const DEFAULT_WIDTH = 24;
+
+    try {
+      if (entryLogical != null && typeof bandBars === "number") {
+        const targetLogical = entryLogical + bandBars;
+        const targetCssX = this.converter.logicalToCoordinate(targetLogical);
+
+        if (targetCssX != null) {
+          const cssDelta = Math.max(0, targetCssX - entryX);
+          return Math.max(
+            MIN_WIDTH,
+            Math.round(cssDelta * scope.horizontalPixelRatio)
+          );
+        }
+      }
+    } catch {
+      // Fall through to default
+    }
+
+    return Math.round(DEFAULT_WIDTH * scope.horizontalPixelRatio);
+  }
+
+  convertLegacyBandWidth(
+    legacyPixelWidth: number,
+    entryLogical: number
+  ): number {
+    try {
+      const ts = this.chart.timeScale();
+      const entryX = this.converter.logicalToCoordinate(entryLogical);
+
+      if (entryX == null) return 30;
+
+      // Estimate pixels per bar
+      const nextLogical = entryLogical + 1;
+      const nextX = this.converter.logicalToCoordinate(nextLogical);
+
+      if (nextX == null) return 30;
+
+      const pixelsPerBar = Math.abs(nextX - entryX) || 10;
+      return Math.max(1, Math.round(legacyPixelWidth / pixelsPerBar));
+    } catch {
+      return 30;
+    }
+  }
+}
+
+class HitDetector {
+  computeHitDeviceX(
+    source: any,
+    scope: BitmapCoordinatesRenderingScope,
+    entryDeviceX: number,
+    bandDeviceWidth: number,
+    converter: CoordinateConverter
+  ): number | null {
+    const ts = source._chart.timeScale();
+
+    // Priority 1: Use stored logical index (most reliable)
+    if (typeof source._hitLogical === "number") {
+      const coord = converter.logicalToCoordinate(source._hitLogical);
+      if (coord != null) {
+        return Math.round(coord * scope.horizontalPixelRatio);
+      }
+    }
+
+    // Priority 2: Try converting numeric _hitTime as logical index
+    if (typeof source._hitTime === "number") {
+      const coord = converter.logicalToCoordinate(source._hitTime);
+      if (coord != null) {
+        return Math.round(coord * scope.horizontalPixelRatio);
+      }
+    }
+
+    // Priority 3: Convert _hitTime as actual time
+    if (source._hitTime) {
+      const coord = converter.timeToCoordinate(source._hitTime);
+      if (coord != null) {
+        return Math.round(coord * scope.horizontalPixelRatio);
+      }
+    }
+
+    // Priority 4: If hit exists but off-screen, return band right edge
+    if (source._hit) {
+      return Math.round(entryDeviceX + bandDeviceWidth);
+    }
+
+    return null;
+  }
+}
+
+// ============================================================================
+// RENDERER
+// ============================================================================
+
+class PositionPaneRenderer implements IPrimitivePaneRenderer {
+  constructor(private view: PositionPaneView) {}
+
+  draw(target: CanvasRenderingTarget2D) {
+    this.view.update();
+
+    const { entryX, entryY, tpY, slY } = this.view._coords;
+    if (entryX == null || entryY == null || tpY == null || slY == null) return;
+
+    target.useBitmapCoordinateSpace((scope) => {
+      const renderer = new BitmapRenderer(scope, this.view, {
+        entryX,
+        entryY,
+        tpY,
+        slY,
+      });
+      renderer.render();
+    });
+  }
+}
+
+class BitmapRenderer {
+  private ctx: CanvasRenderingContext2D;
+  private converter: CoordinateConverter;
+  private bandCalc: BandWidthCalculator;
+  private hitDetector: HitDetector;
+
+  constructor(
+    private scope: BitmapCoordinatesRenderingScope,
+    private view: PositionPaneView,
+    private coords: { entryX: number; entryY: number; tpY: number; slY: number }
+  ) {
+    this.ctx = scope.context;
+    const source = view._source as any;
+    this.converter = new CoordinateConverter(source._chart);
+    this.bandCalc = new BandWidthCalculator(source._chart, this.converter);
+    this.hitDetector = new HitDetector();
+  }
+
+  render() {
+    const deviceCoords = this.calculateDeviceCoordinates();
+    const bandWidth = this.calculateBandWidth(deviceCoords);
+
+    this.drawBands(deviceCoords, bandWidth);
+    this.drawArrow(deviceCoords, bandWidth);
+    this.drawBorders(deviceCoords, bandWidth);
+    this.drawLabels(deviceCoords, bandWidth);
+  }
+
+  private calculateDeviceCoordinates() {
+    return {
+      x: Math.round(this.coords.entryX * this.scope.horizontalPixelRatio),
+      yEntry: Math.round(this.coords.entryY * this.scope.verticalPixelRatio),
+      yTp: Math.round(this.coords.tpY * this.scope.verticalPixelRatio),
+      ySl: Math.round(this.coords.slY * this.scope.verticalPixelRatio),
+    };
+  }
+
+  private calculateBandWidth(
+    deviceCoords: ReturnType<typeof this.calculateDeviceCoordinates>
+  ): number {
+    const source = this.view._source as any;
+    const entryLogical = this.getEntryLogical();
+
+    const bandBars = this.getBandBars(entryLogical);
+    const desiredWidth = this.bandCalc.calculateDeviceWidth(
+      this.coords.entryX,
+      entryLogical,
+      bandBars,
+      this.scope
+    );
+
+    const available = Math.max(0, this.scope.bitmapSize.width - deviceCoords.x);
+    return Math.max(8, Math.min(desiredWidth, available));
+  }
+
+  private getEntryLogical(): number | null {
+    const source = this.view._source as any;
+
+    if (typeof source._entry?.logical === "number") {
+      return source._entry.logical;
+    }
+
+    return this.converter.coordinateToLogical(this.coords.entryX as Coordinate);
+  }
+
+  private getBandBars(entryLogical: number | null): number {
+    const source = this.view._source as any;
+    const options = this.view._options as any;
+
+    if (typeof options.bandBars === "number") {
+      return options.bandBars;
+    }
+
+    // Convert legacy bandWidth to bandBars
+    if (typeof options.bandWidth === "number" && entryLogical != null) {
+      const converted = this.bandCalc.convertLegacyBandWidth(
+        options.bandWidth,
+        entryLogical
+      );
+
+      // Persist conversion
+      if (source.updateOptions) {
+        source.updateOptions({ bandBars: converted, bandWidth: undefined });
+      }
+
+      return converted;
+    }
+
+    return 30;
+  }
+
+  private drawBands(
+    deviceCoords: ReturnType<typeof this.calculateDeviceCoordinates>,
+    bandWidth: number
+  ) {
+    const { x, yEntry, yTp, ySl } = deviceCoords;
+
+    // TP zone
+    this.ctx.fillStyle = this.view._options.tpColor;
+    const topTp = Math.min(yEntry, yTp);
+    const heightTp = Math.abs(yTp - yEntry);
+    this.ctx.fillRect(x, topTp, bandWidth, heightTp);
+
+    // SL zone
+    this.ctx.fillStyle = this.view._options.slColor;
+    const topSl = Math.min(yEntry, ySl);
+    const heightSl = Math.abs(ySl - yEntry);
+    this.ctx.fillRect(x, topSl, bandWidth, heightSl);
+  }
+
+  private drawArrow(
+    deviceCoords: ReturnType<typeof this.calculateDeviceCoordinates>,
+    bandWidth: number
+  ) {
+    const source = this.view._source as any;
+    const { x, yEntry, yTp, ySl } = deviceCoords;
+
+    const target = this.determineArrowTarget(deviceCoords);
+    const arrowEndX = this.calculateArrowEndX(x, bandWidth, target);
+
+    // Draw dashed line
+    this.ctx.strokeStyle = this.view._options.lineColor;
+    this.ctx.lineWidth = 2;
+    this.ctx.setLineDash([8, 6]);
+    this.ctx.beginPath();
+    this.ctx.moveTo(x, yEntry);
+    this.ctx.lineTo(arrowEndX, target.y);
+    this.ctx.stroke();
+    this.ctx.setLineDash([]);
+
+    // Draw arrowhead
+    this.drawArrowhead(x, yEntry, arrowEndX, target.y);
+
+    // Draw off-screen indicator if needed
+    if (target.isOffScreen) {
+      this.drawOffScreenIndicator(arrowEndX, target.y, target.label);
+    }
+  }
+
+  private determineArrowTarget(
+    deviceCoords: ReturnType<typeof this.calculateDeviceCoordinates>
+  ) {
+    const source = this.view._source as any;
+    const { yTp, ySl, yEntry } = deviceCoords;
+
+    const hasHit = source._hit === "tp" || source._hit === "sl";
+
+    if (hasHit) {
+      return {
+        y: source._hit === "tp" ? yTp : ySl,
+        label: source._hit === "tp" ? "TP" : "SL",
+        isOffScreen: false,
+      };
+    }
+
+    // Determine target based on price movement
+    const side = source._options?.side as PositionSide;
+    const entryPrice = source._entry?.price as number;
+    const lastClose = source._lastClose as number | undefined;
+    const referencePrice = lastClose ?? entryPrice;
+
+    const isMovingTowardsTP =
+      side === "long"
+        ? referencePrice >= entryPrice
+        : referencePrice <= entryPrice;
+
+    return {
+      y: isMovingTowardsTP ? yTp : ySl,
+      label: isMovingTowardsTP ? "TP" : "SL",
+      isOffScreen: false,
+    };
+  }
+
+  private calculateArrowEndX(
+    entryX: number,
+    bandWidth: number,
+    target: { isOffScreen: boolean }
+  ): number {
+    const source = this.view._source as any;
+    const hasHit = source._hit === "tp" || source._hit === "sl";
+
+    if (hasHit) {
+      const hitX = this.hitDetector.computeHitDeviceX(
+        source,
+        this.scope,
+        entryX,
+        bandWidth,
+        this.converter
+      );
+
+      if (hitX != null) {
+        // Clamp to reasonable bounds
+        const minX = entryX + Math.round(8 * this.scope.horizontalPixelRatio);
+        const maxX =
+          this.scope.bitmapSize.width -
+          Math.round(12 * this.scope.horizontalPixelRatio);
+        return Math.max(minX, Math.min(hitX, maxX));
+      }
+
+      // Hit exists but off-screen
+      target.isOffScreen = true;
+      return Math.min(
+        entryX + bandWidth,
+        this.scope.bitmapSize.width -
+          Math.round(24 * this.scope.horizontalPixelRatio)
+      );
+    }
+
+    // No hit: extend to band edge
+    const minLength = Math.round(24 * this.scope.horizontalPixelRatio);
+    const maxX =
+      this.scope.bitmapSize.width -
+      Math.round(12 * this.scope.horizontalPixelRatio);
+    return Math.min(Math.max(entryX + minLength, entryX + bandWidth), maxX);
+  }
+
+  private drawArrowhead(
+    startX: number,
+    startY: number,
+    endX: number,
+    endY: number
+  ) {
+    const headSize = 6 * this.scope.horizontalPixelRatio;
+    const dx = endX - startX;
+    const dy = endY - startY;
+    const angle = Math.atan2(dy, dx);
+
+    this.ctx.fillStyle = this.view._options.lineColor;
+    this.ctx.beginPath();
+    this.ctx.moveTo(endX, endY);
+    this.ctx.lineTo(
+      endX - headSize * Math.cos(angle - Math.PI / 6),
+      endY - headSize * Math.sin(angle - Math.PI / 6)
+    );
+    this.ctx.lineTo(
+      endX - headSize * Math.cos(angle + Math.PI / 6),
+      endY - headSize * Math.sin(angle + Math.PI / 6)
+    );
+    this.ctx.closePath();
+    this.ctx.fill();
+  }
+
+  private drawOffScreenIndicator(x: number, y: number, label: string) {
+    const indicatorSize = 8 * this.scope.horizontalPixelRatio;
+
+    this.ctx.fillStyle = this.view._options.lineColor;
+    this.ctx.beginPath();
+    this.ctx.moveTo(x, y);
+    this.ctx.lineTo(x - indicatorSize, y - indicatorSize / 2);
+    this.ctx.lineTo(x - indicatorSize, y + indicatorSize / 2);
+    this.ctx.closePath();
+    this.ctx.fill();
+
+    // Label
+    this.ctx.fillStyle = "#fff";
+    this.ctx.font = `${10 * this.scope.horizontalPixelRatio}px Arial`;
+    const text = `${label} (off-screen)`;
+    const labelWidth = this.ctx.measureText(text).width;
+    this.ctx.fillText(
+      text,
+      x -
+        indicatorSize -
+        labelWidth -
+        Math.round(6 * this.scope.horizontalPixelRatio),
+      y - Math.round(10 * this.scope.verticalPixelRatio)
+    );
+  }
+
+  private drawBorders(
+    deviceCoords: ReturnType<typeof this.calculateDeviceCoordinates>,
+    bandWidth: number
+  ) {
+    const { x, yEntry, yTp, ySl } = deviceCoords;
+
+    this.ctx.strokeStyle = this.view._options.lineColor;
+    this.ctx.lineWidth = this.view._options.width;
+    this.ctx.beginPath();
+    this.ctx.moveTo(x, yEntry);
+    this.ctx.lineTo(x + bandWidth, yEntry);
+    this.ctx.moveTo(x, yTp);
+    this.ctx.lineTo(x + bandWidth, yTp);
+    this.ctx.moveTo(x, ySl);
+    this.ctx.lineTo(x + bandWidth, ySl);
+    this.ctx.stroke();
+  }
+
+  private drawLabels(
+    deviceCoords: ReturnType<typeof this.calculateDeviceCoordinates>,
+    bandWidth: number
+  ) {
+    const { x, yEntry } = deviceCoords;
+    const source = this.view._source;
+
+    // P/L percentage
+    this.ctx.fillStyle = "#ffffff";
+    this.ctx.font = `${12 * this.scope.horizontalPixelRatio}px Arial`;
+    const plPerc = source._plPercent().toFixed(2) + "%";
+    this.ctx.fillText(plPerc, x + 8, yEntry - 8);
+
+    // Risk:Reward ratio
+    this.drawRiskRewardBox(x, yEntry, bandWidth);
+  }
+
+  private drawRiskRewardBox(x: number, yEntry: number, bandWidth: number) {
+    try {
+      const source = this.view._source;
+      const entry = source._entry.price;
+      const tp = source._tp;
+      const sl = source._sl;
+
+      const risk = Math.abs(entry - sl);
+      const reward = Math.abs(tp - entry);
+      const rr = risk > 0 ? (reward / risk).toFixed(2) : "-";
+
+      const label = `R:R ${rr}`;
+      const m = this.ctx.measureText(label);
+      const pad = 6 * this.scope.horizontalPixelRatio;
+      const boxW = m.width + pad * 2;
+      const boxH = 18 * this.scope.verticalPixelRatio;
+
+      this.ctx.fillStyle = "rgba(0,0,0,0.6)";
+      this.ctx.fillRect(
+        x + bandWidth - boxW - 8,
+        yEntry - boxH - 8,
+        boxW,
+        boxH
+      );
+
+      this.ctx.fillStyle = "#fff";
+      this.ctx.fillText(
+        label,
+        x + bandWidth - boxW - 8 + pad,
+        yEntry - 8 + boxH / 2 - 4
+      );
+    } catch {
+      // Silently fail if R:R calculation fails
+    }
+  }
+}
+
+// ============================================================================
+// VIEW
+// ============================================================================
+
 class PositionPaneView implements IPrimitivePaneView {
-  _source: PositionTool;
-  _coords: {
-    entryX: Coordinate | null;
-    entryY: Coordinate | null;
-    tpY: Coordinate | null;
-    slY: Coordinate | null;
-  } = { entryX: null, entryY: null, tpY: null, slY: null };
-  _options: PositionOptions;
-  constructor(source: PositionTool) {
-    this._source = source;
-    this._options = source._options;
-  }
+  _coords: RenderCoordinates = {
+    entryX: null,
+    entryY: null,
+    tpY: null,
+    slY: null,
+    hitPriceY: null,
+  };
+
+  constructor(public _source: PositionTool, public _options: PositionOptions) {}
+
   update() {
-    const s = this._source;
-    const ts = s._chart.timeScale();
-    const entryX =
-      typeof s._entry.logical === "number"
-        ? ts.logicalToCoordinate(s._entry.logical as Logical)
-        : ts.timeToCoordinate(s._entry.time as Time);
-    const yEntry = s._series.priceToCoordinate(s._entry.price);
-    const yTp = s._series.priceToCoordinate(s._tp);
-    const ySl = s._series.priceToCoordinate(s._sl);
-    this._coords = { entryX, entryY: yEntry, tpY: yTp, slY: ySl };
-    this._options = s._options;
+    const converter = new CoordinateConverter(this._source._chart);
+
+    const entryX = this.calculateEntryX(converter);
+    const entryY = this._source._series.priceToCoordinate(
+      this._source._entry.price
+    );
+    const tpY = this._source._series.priceToCoordinate(this._source._tp);
+    const slY = this._source._series.priceToCoordinate(this._source._sl);
+    const hitPriceY = this.calculateHitPriceY();
+
+    this._coords = { entryX, entryY: entryY, tpY, slY, hitPriceY };
+    this._options = this._source._options;
   }
+
+  private calculateEntryX(converter: CoordinateConverter): Coordinate | null {
+    // Try logical first (most reliable)
+    if (typeof this._source._entry.logical === "number") {
+      const coord = converter.logicalToCoordinate(this._source._entry.logical);
+      if (coord != null) return coord;
+    }
+
+    // Try time
+    if (this._source._entry.time != null) {
+      return converter.timeToCoordinate(this._source._entry.time);
+    }
+
+    return null;
+  }
+
+  private calculateHitPriceY(): Coordinate | null {
+    if (!this._source._hit || typeof this._source._hitPrice !== "number") {
+      return null;
+    }
+
+    const coord = this._source._series.priceToCoordinate(
+      this._source._hitPrice
+    );
+    return coord != null && typeof coord === "number" ? coord : null;
+  }
+
   renderer(): IPrimitivePaneRenderer {
     return new PositionPaneRenderer(this);
   }
 }
+
+// ============================================================================
+// MAIN TOOL CLASS
+// ============================================================================
 
 export class PositionTool implements ISeriesPrimitive<Time> {
   _chart: IChartApi;
@@ -521,8 +652,8 @@ export class PositionTool implements ISeriesPrimitive<Time> {
   _hit: "tp" | "sl" | null = null;
   _hitTime: Time | undefined = undefined;
   _hitLogical: number | undefined = undefined;
+  _hitPrice: number | undefined = undefined;
   _lastClose: number | undefined = undefined;
-  // note: we store only hit time; convert to coordinates each render so arrow follows panning/zoom
   _paneViews: PositionPaneView[];
   _options: PositionOptions;
 
@@ -539,8 +670,14 @@ export class PositionTool implements ISeriesPrimitive<Time> {
     this._entry = entry;
     this._tp = tp;
     this._sl = sl;
-    this._options = { ...defaultOptions, ...options };
-    this._paneViews = [new PositionPaneView(this)];
+    this._options = { ...DEFAULT_OPTIONS, ...options };
+    this._paneViews = [new PositionPaneView(this, this._options)];
+
+    // Initialize after chart is ready
+    setTimeout(() => {
+      this.updateAllViews();
+      this.checkAllHistoricalBars();
+    }, 100);
   }
 
   paneViews() {
@@ -548,16 +685,99 @@ export class PositionTool implements ISeriesPrimitive<Time> {
   }
 
   autoscaleInfo(start: Logical, end: Logical): AutoscaleInfo | null {
-    const pmin = Math.min(this._entry.price, this._tp, this._sl);
-    const pmax = Math.max(this._entry.price, this._tp, this._sl);
-    return { priceRange: { minValue: pmin, maxValue: pmax } };
+    const prices = [this._entry.price, this._tp, this._sl];
+    return {
+      priceRange: {
+        minValue: Math.min(...prices),
+        maxValue: Math.max(...prices),
+      },
+    };
   }
 
   updateAllViews() {
     this._paneViews.forEach((v) => v.update());
   }
 
-  // Called by the chart when a new historical or live bar arrives
+  checkAllHistoricalBars() {
+    if (this._hit || !this._series || !this._chart) return;
+
+    try {
+      const allData = (this._series as any).data?.() || [];
+      if (!Array.isArray(allData) || allData.length === 0) return;
+
+      const sortedBars = this.sortBarsByTime(allData);
+
+      for (const bar of sortedBars) {
+        if (this._hit) break;
+        if (this.shouldCheckBar(bar)) {
+          this.checkBar(bar);
+        }
+      }
+
+      if (this._hit) {
+        this.updateAllViews();
+      }
+    } catch (err) {
+      console.warn("checkAllHistoricalBars error:", err);
+    }
+  }
+
+  private sortBarsByTime(bars: any[]): any[] {
+    return [...bars].sort((a, b) => {
+      const getTime = (bar: any) => {
+        if (typeof bar.time === "number") return bar.time;
+        return bar.time?.time || bar.time?.timestamp || 0;
+      };
+      return getTime(a) - getTime(b);
+    });
+  }
+
+  private shouldCheckBar(bar: any): boolean {
+    const barLogical = this.getBarLogical(bar);
+    const barTime = bar.time;
+
+    // Compare by logical index (preferred)
+    if (this._entry.logical != null && barLogical != null) {
+      return barLogical > this._entry.logical;
+    }
+
+    // Fallback to time comparison
+    if (this._entry.time != null && barTime != null) {
+      const entryTime = this.extractTimeValue(this._entry.time);
+      const currentTime = this.extractTimeValue(barTime);
+      return currentTime > entryTime;
+    }
+
+    // If can't compare, check anyway to be safe
+    return true;
+  }
+
+  private getBarLogical(bar: any): number | undefined {
+    if (typeof bar.logical === "number") return bar.logical;
+
+    if (bar.time != null) {
+      try {
+        const converter = new CoordinateConverter(this._chart);
+        const coord = converter.timeToCoordinate(bar.time);
+        if (coord != null) {
+          return converter.coordinateToLogical(coord) ?? undefined;
+        }
+      } catch {
+        // Fall through
+      }
+    }
+
+    return undefined;
+  }
+
+  private extractTimeValue(time: any): number {
+    if (typeof time === "number") return time;
+    if (typeof time === "object" && time) {
+      return time.time || time.timestamp || 0;
+    }
+    return 0;
+  }
+
   checkBar(bar: {
     open: number;
     high: number;
@@ -566,347 +786,232 @@ export class PositionTool implements ISeriesPrimitive<Time> {
     time?: Time;
     logical?: number;
   }) {
-    // always remember the most recent close for directional arrow logic
-    this._lastClose = bar?.close;
-    if (this._hit) return; // already hit
-    const { high, low, time } = bar;
-    
-    // Try to get logical index for this bar - use provided logical or compute from time
-    let barLogical: number | undefined = (bar as any).logical;
-    if (barLogical == null && time != null) {
-      try {
-        const ts = this._chart.timeScale();
-        const coord = ts.timeToCoordinate(time as any);
-        if (typeof coord === "number") {
-          const lg = ts.coordinateToLogical(coord as any);
-          if (typeof lg === "number") barLogical = lg;
-        }
-      } catch {
-        // ignore
-      }
-    }
-    // helper to robustly convert a Time to a timeScale coordinate
-    const tryTimeToCoord = (t: any) => {
-      try {
-        const c = this._chart.timeScale().timeToCoordinate(t as any);
-        return c ?? null;
-      } catch {
-        return null;
-      }
-    };
+    this._lastClose = bar.close;
+    if (this._hit) return;
+
+    if (!this.shouldCheckBar(bar)) return;
+
+    const barLogical = this.getBarLogical(bar);
+
     if (this._options.side === "long") {
-      if (high >= this._tp) {
-        this._hit = "tp";
-        this._hitTime = time;
-        // Store the logical index for precise arrow positioning
-        if (typeof barLogical === "number") {
-          this._hitLogical = barLogical;
-        } else {
-          // Fallback: try to capture a logical index for stable mapping
-          try {
-            const ts = this._chart.timeScale();
-            const tryConvert = (t: any) => {
-              try {
-                const c = ts.timeToCoordinate(t as any);
-                if (typeof c === "number")
-                  return ts.coordinateToLogical(c as any);
-              } catch {}
-              return null;
-            };
-            let lg = tryConvert(time);
-            if (lg == null && typeof time === "number") {
-              const maybeMs = Math.floor(time as number);
-              if (maybeMs > 1e12) lg = tryConvert(Math.floor(maybeMs / 1000));
-            }
-            if (lg == null && time && typeof time === "object") {
-              const tobj: any = time;
-              if (typeof tobj.time === "number") lg = tryConvert(tobj.time);
-              else if (typeof tobj.timestamp === "number")
-                lg = tryConvert(tobj.timestamp);
-            }
-            if (typeof lg === "number") this._hitLogical = lg;
-          } catch {}
-        }
-        try {
-          // debug logging to help reproduce mapping issues
-          // eslint-disable-next-line no-console
-          console.debug("PositionTool hit=tp", {
-            hitTime: this._hitTime,
-            side: this._options.side,
-            tp: this._tp,
-            sl: this._sl,
-          });
-        } catch {}
-        this.updateAllViews();
-      } else if (low <= this._sl) {
-        this._hit = "sl";
-        this._hitTime = time;
-        // Store the logical index for precise arrow positioning
-        if (typeof barLogical === "number") {
-          this._hitLogical = barLogical;
-        } else {
-          // Fallback: try to capture a logical index for stable mapping
-          try {
-            const ts = this._chart.timeScale();
-            const tryConvert = (t: any) => {
-              try {
-                const c = ts.timeToCoordinate(t as any);
-                if (typeof c === "number")
-                  return ts.coordinateToLogical(c as any);
-              } catch {}
-              return null;
-            };
-            let lg = tryConvert(time);
-            if (lg == null && typeof time === "number") {
-              const maybeMs = Math.floor(time as number);
-              if (maybeMs > 1e12) lg = tryConvert(Math.floor(maybeMs / 1000));
-            }
-            if (lg == null && time && typeof time === "object") {
-              const tobj: any = time;
-              if (typeof tobj.time === "number") lg = tryConvert(tobj.time);
-              else if (typeof tobj.timestamp === "number")
-                lg = tryConvert(tobj.timestamp);
-            }
-            if (typeof lg === "number") this._hitLogical = lg;
-          } catch {}
-        }
-        try {
-          // eslint-disable-next-line no-console
-          console.debug("PositionTool hit=sl", {
-            hitTime: this._hitTime,
-            side: this._options.side,
-            tp: this._tp,
-            sl: this._sl,
-          });
-        } catch {}
-        this.updateAllViews();
+      if (bar.high >= this._tp) {
+        this.recordHit("tp", bar.time, barLogical, bar.high);
+      } else if (bar.low <= this._sl) {
+        this.recordHit("sl", bar.time, barLogical, bar.low);
       }
     } else {
       // short
-      if (low <= this._tp) {
-        this._hit = "tp";
-        this._hitTime = time;
-        // Store the logical index for precise arrow positioning
-        if (typeof barLogical === "number") {
-          this._hitLogical = barLogical;
-        } else {
-          // Fallback: try to capture a logical index for stable mapping
-          try {
-            const ts = this._chart.timeScale();
-            const tryConvert = (t: any) => {
-              try {
-                const c = ts.timeToCoordinate(t as any);
-                if (typeof c === "number")
-                  return ts.coordinateToLogical(c as any);
-              } catch {}
-              return null;
-            };
-            let lg = tryConvert(time);
-            if (lg == null && typeof time === "number") {
-              const maybeMs = Math.floor(time as number);
-              if (maybeMs > 1e12) lg = tryConvert(Math.floor(maybeMs / 1000));
-            }
-            if (lg == null && time && typeof time === "object") {
-              const tobj: any = time;
-              if (typeof tobj.time === "number") lg = tryConvert(tobj.time);
-              else if (typeof tobj.timestamp === "number")
-                lg = tryConvert(tobj.timestamp);
-            }
-            if (typeof lg === "number") this._hitLogical = lg;
-          } catch {}
-        }
-        try {
-          // eslint-disable-next-line no-console
-          console.debug("PositionTool hit=tp (short)", {
-            hitTime: this._hitTime,
-            side: this._options.side,
-            tp: this._tp,
-            sl: this._sl,
-          });
-        } catch {}
-        this.updateAllViews();
-      } else if (high >= this._sl) {
-        this._hit = "sl";
-        this._hitTime = time;
-        // Store the logical index for precise arrow positioning
-        if (typeof barLogical === "number") {
-          this._hitLogical = barLogical;
-        } else {
-          // Fallback: try to capture a logical index for stable mapping
-          try {
-            const ts = this._chart.timeScale();
-            const tryConvert = (t: any) => {
-              try {
-                const c = ts.timeToCoordinate(t as any);
-                if (typeof c === "number")
-                  return ts.coordinateToLogical(c as any);
-              } catch {}
-              return null;
-            };
-            let lg = tryConvert(time);
-            if (lg == null && typeof time === "number") {
-              const maybeMs = Math.floor(time as number);
-              if (maybeMs > 1e12) lg = tryConvert(Math.floor(maybeMs / 1000));
-            }
-            if (lg == null && time && typeof time === "object") {
-              const tobj: any = time;
-              if (typeof tobj.time === "number") lg = tryConvert(tobj.time);
-              else if (typeof tobj.timestamp === "number")
-                lg = tryConvert(tobj.timestamp);
-            }
-            if (typeof lg === "number") this._hitLogical = lg;
-          } catch {}
-        }
-        try {
-          // eslint-disable-next-line no-console
-          console.debug("PositionTool hit=sl (short)", {
-            hitTime: this._hitTime,
-            side: this._options.side,
-            tp: this._tp,
-            sl: this._sl,
-          });
-        } catch {}
-        this.updateAllViews();
+      if (bar.low <= this._tp) {
+        this.recordHit("tp", bar.time, barLogical, bar.low);
+      } else if (bar.high >= this._sl) {
+        this.recordHit("sl", bar.time, barLogical, bar.high);
       }
     }
   }
 
-  // internal hit test for tool logic
+  private recordHit(
+    type: "tp" | "sl",
+    time: Time | undefined,
+    logical: number | undefined,
+    price: number
+  ) {
+    this._hit = type;
+    this._hitTime = time;
+    this._hitLogical = logical;
+    this._hitPrice = price;
+
+    console.log(`[PositionTool] Hit ${type.toUpperCase()} detected:`, {
+      hitTime: time,
+      hitLogical: logical,
+      hitPrice: price,
+      side: this._options.side,
+    });
+
+    this.updateAllViews();
+  }
+
   isHit(px: number, py: number): "body" | "tp" | "sl" | "resize" | null {
     const v = this._paneViews[0];
-    const { entryX, entryY, tpY, slY } = v._coords;
-    if (entryX == null || entryY == null || tpY == null || slY == null)
-      return null;
-    
-    // Calculate band width in CSS coordinates from bandBars
-    let bandWidthCss: number;
-    try {
-      const ts = this._chart.timeScale();
-      const entryLogical = typeof this._entry.logical === "number" 
-        ? this._entry.logical 
-        : ts.coordinateToLogical(entryX as any) as number | null;
-      
-      if (entryLogical != null) {
-        const bandBars = (this._options as any).bandBars ?? 30;
-        const targetLogical = entryLogical + bandBars;
-        const targetX = ts.logicalToCoordinate(targetLogical as any) as number | null;
-        if (targetX != null) {
-          bandWidthCss = Math.max(0, (targetX as number) - (entryX as number));
-        } else {
-          bandWidthCss = (this._options as any).bandWidth ?? 120; // fallback
-        }
-      } else {
-        bandWidthCss = (this._options as any).bandWidth ?? 120; // fallback
-      }
-    } catch {
-      bandWidthCss = (this._options as any).bandWidth ?? 120; // fallback
+    if (!v) return null;
+
+    // Ensure coordinates are up-to-date
+    for (let i = 0; i < 3; i++) {
+      v.update();
+      if (v._coords.entryX != null) break;
     }
-    
-    const x2 = entryX + bandWidthCss;
-    const minY = Math.min(entryY, tpY, slY);
-    const maxY = Math.max(entryY, tpY, slY);
-    const edgeTolerance = 6;
-    
-    // allow a small tolerance outside band for resize handle
-    if (px >= entryX - edgeTolerance && px <= x2 + edgeTolerance) {
-      // check right-edge first for resize (within tolerance)
-      if (Math.abs(px - x2) <= edgeTolerance) return "resize";
-      if (Math.abs(py - tpY) <= edgeTolerance) return "tp";
-      if (Math.abs(py - slY) <= edgeTolerance) return "sl";
-      if (Math.abs(py - entryY) <= edgeTolerance) return "body"; // treat entry horizontal as body hit for dragging entry
+
+    const { entryX, entryY, tpY, slY } = v._coords;
+    if (entryX == null || entryY == null || tpY == null || slY == null) {
+      return null;
+    }
+
+    const bandWidth = this.calculateBandWidthCss();
+    const x2 = entryX + bandWidth;
+    const tolerance = 6;
+
+    if (px >= entryX - tolerance && px <= x2 + tolerance) {
+      // Check resize handle first
+      if (Math.abs(px - x2) <= tolerance) return "resize";
+
+      // Check horizontal lines
+      if (Math.abs(py - tpY) <= tolerance) return "tp";
+      if (Math.abs(py - slY) <= tolerance) return "sl";
+      if (Math.abs(py - entryY) <= tolerance) return "body";
+
+      // Check if inside band vertically
+      const minY = Math.min(entryY, tpY, slY);
+      const maxY = Math.max(entryY, tpY, slY);
       if (py >= minY && py <= maxY) return "body";
     }
+
     return null;
   }
 
-  // allow external resize of band width (chart-coordinate units)
-  setBandWidth(bw: number) {
-    // bw is in CSS pixels (chart coordinates). Convert to bars and store as bandBars.
+  private calculateBandWidthCss(): number {
     try {
-      const ts = this._chart.timeScale();
-      // compute entry logical (preferred) or CSS X
-      let entryLogical: number | null = null;
-      let entryCssX: number | null = null;
-      
-      const entry = this._entry;
-      if (typeof entry.logical === "number") {
-        entryLogical = entry.logical;
-        entryCssX = ts.logicalToCoordinate(entry.logical as any) as number | null;
-      } else if (entry.time != null) {
-        entryCssX = ts.timeToCoordinate(entry.time as any) as number | null;
-        if (entryCssX != null) {
-          entryLogical = ts.coordinateToLogical(entryCssX as any) as number | null;
+      const converter = new CoordinateConverter(this._chart);
+      const entryX = converter.logicalToCoordinate(this._entry.logical);
+      const entryLogical = this._entry.logical;
+
+      if (entryX != null && entryLogical != null) {
+        const bandBars = (this._options as any).bandBars ?? 30;
+        const targetLogical = entryLogical + bandBars;
+        const targetX = converter.logicalToCoordinate(targetLogical);
+
+        if (targetX != null) {
+          return Math.max(0, targetX - entryX);
         }
       }
-      
-      if (entryCssX != null && entryLogical != null) {
-        // Calculate the logical coordinate at entryCssX + bw
-        const targetCssX = (entryCssX as number) + bw;
-        const targetLogical = ts.coordinateToLogical(targetCssX as any) as number | null;
+    } catch {
+      // Fall through to default
+    }
+
+    return (this._options as any).bandWidth ?? 120;
+  }
+
+  setBandWidth(newWidthCss: number) {
+    // Preserve hit state during resize
+    const preservedState = {
+      hit: this._hit,
+      hitTime: this._hitTime,
+      hitLogical: this._hitLogical,
+      hitPrice: this._hitPrice,
+    };
+
+    try {
+      const converter = new CoordinateConverter(this._chart);
+      const entryLogical = this._entry.logical;
+      const entryX = converter.logicalToCoordinate(entryLogical);
+
+      if (entryLogical != null && entryX != null) {
+        const targetX = entryX + newWidthCss;
+        const targetLogical = converter.coordinateToLogical(targetX as Coordinate);
+
         if (targetLogical != null) {
-          const bars = Math.max(1, Math.round((targetLogical as number) - (entryLogical as number)));
+          const bars = Math.max(1, Math.round(targetLogical - entryLogical));
           (this._options as any).bandBars = bars;
-          (this._options as any).bandWidth = undefined; // clear legacy
-          this.updateAllViews();
-          return;
-        }
-      }
-      
-      // Fallback: if conversion fails, store approximate based on current scale
-      const currentBandBars = (this._options as any).bandBars ?? 30;
-      const entryX = entryCssX ?? (ts.logicalToCoordinate(entryLogical as any) as number | null);
-      if (entryX != null) {
-        // Estimate px per bar
-        const testLogical = entryLogical ?? (ts.coordinateToLogical(entryX as any) as number | null);
-        if (testLogical != null) {
-          const nextLogical = testLogical + 1;
-          const nextX = ts.logicalToCoordinate(nextLogical as any) as number | null;
-          if (nextX != null) {
-            const pxPerBar = Math.abs((nextX as number) - (entryX as number)) || 1;
-            const estBars = Math.max(1, Math.round(bw / pxPerBar));
-            (this._options as any).bandBars = estBars;
-            (this._options as any).bandWidth = undefined;
-          }
+          (this._options as any).bandWidth = undefined;
         }
       }
     } catch (err) {
       console.warn("setBandWidth error:", err);
     }
+
+    // Restore hit state
+    this._hit = preservedState.hit;
+    this._hitTime = preservedState.hitTime;
+    this._hitLogical = preservedState.hitLogical;
+    this._hitPrice = preservedState.hitPrice;
+
     this.updateAllViews();
   }
 
   setEntry(pt: PositionPoint) {
-    this._entry = pt;
+    this._entry = this.enrichPoint(pt);
+    this.resetHitState();
     this.updateAllViews();
   }
 
+  private enrichPoint(pt: PositionPoint): PositionPoint {
+    const converter = new CoordinateConverter(this._chart);
+    const enriched = { ...pt };
+
+    // Try to add logical if missing
+    if (typeof enriched.logical !== "number" && enriched.time != null) {
+      const coord = converter.timeToCoordinate(enriched.time);
+      if (coord != null) {
+        const logical = converter.coordinateToLogical(coord);
+        if (typeof logical === "number") {
+          enriched.logical = logical;
+        }
+      }
+    }
+
+    // Try to add time if missing
+    if (enriched.time == null && typeof enriched.logical === "number") {
+      const coord = converter.logicalToCoordinate(enriched.logical);
+      if (coord != null) {
+        const time = converter.coordinateToTime(coord);
+        if (time != null) {
+          enriched.time = time;
+        }
+      }
+    }
+
+    return enriched;
+  }
+
+  private resetHitState() {
+    this._hit = null;
+    this._hitTime = undefined;
+    this._hitLogical = undefined;
+    this._hitPrice = undefined;
+  }
+
   moveBy(deltaLogical: number, deltaPrice: number) {
-    if (typeof this._entry.logical === "number")
+    if (typeof this._entry.logical === "number") {
       this._entry.logical += deltaLogical;
+
+      // Update time to match new logical position
+      const converter = new CoordinateConverter(this._chart);
+      const coord = converter.logicalToCoordinate(this._entry.logical);
+      if (coord != null) {
+        const time = converter.coordinateToTime(coord);
+        if (time != null) {
+          this._entry.time = time;
+        }
+      }
+    }
+
     this._entry.price += deltaPrice;
     this._tp += deltaPrice;
     this._sl += deltaPrice;
+
+    this.resetHitState();
     this.updateAllViews();
   }
 
   setTp(price: number) {
     this._tp = price;
+    this.resetHitState();
     this.updateAllViews();
   }
+
   setSl(price: number) {
     this._sl = price;
+    this.resetHitState();
     this.updateAllViews();
   }
 
   getOptions() {
     return this._options;
   }
+
   updateOptions(opts: Partial<PositionOptions>) {
     this._options = { ...this._options, ...opts };
     this.updateAllViews();
   }
 
-  // simple P/L percent from entry to tp depending on side
   _plPercent(): number {
     const diff =
       this._options.side === "long"

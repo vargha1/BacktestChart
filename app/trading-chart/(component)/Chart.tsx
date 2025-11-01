@@ -326,7 +326,7 @@ export default function Chart() {
       window.removeEventListener("resize", updatePos);
     };
   }, [
-    selectedLineRef,
+    // selectedLineRef,
     selectionTick,
     allOhlcData.current.length,
     allLineData.current.length,
