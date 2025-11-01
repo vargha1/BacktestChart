@@ -403,13 +403,24 @@ export default function Chart() {
         candlestickSeriesRef.current.setData(sorted);
         // notify primitives about initial bars
         for (const bar of sorted) {
+          // compute logical index for the bar to help primitives pinpoint candle X precisely
+          let logical: number | undefined = undefined;
+          try {
+            const ts = chartRef.current!.timeScale();
+            const cx = ts.timeToCoordinate(bar.time as any);
+            if (typeof cx === "number") {
+              const lg = ts.coordinateToLogical(cx as any);
+              if (typeof lg === "number") logical = lg;
+            }
+          } catch {}
           notifyNewBar?.({
             open: bar.open,
             high: bar.high,
             low: bar.low,
             close: bar.close,
             time: bar.time,
-          });
+            logical,
+          } as any);
         }
         // Dev helper: if running on localhost, after a short delay emit a synthetic bar
         // that will hit the first PositionTool found (useful to reproduce hit logic).
@@ -514,13 +525,23 @@ export default function Chart() {
               incomingLast as unknown as CandlestickData
             );
             // notify primitives about updated bar
+            let logicalReplace: number | undefined = undefined;
+            try {
+              const ts = chartRef.current!.timeScale();
+              const cx = ts.timeToCoordinate(incomingLast.time as any);
+              if (typeof cx === "number") {
+                const lg = ts.coordinateToLogical(cx as any);
+                if (typeof lg === "number") logicalReplace = lg;
+              }
+            } catch {}
             notifyNewBar?.({
               open: incomingLast.open,
               high: incomingLast.high,
               low: incomingLast.low,
               close: incomingLast.close,
               time: incomingLast.time,
-            });
+              logical: logicalReplace,
+            } as any);
           } else {
             (candlestickSeriesRef.current as ISeriesApi<"Line">).update({
               time: incomingLast.time,
@@ -565,13 +586,23 @@ export default function Chart() {
         (candlestickSeriesRef.current as ISeriesApi<"Candlestick">).update(
           payload
         );
+        let logicalAppend: number | undefined = undefined;
+        try {
+          const ts = chartRef.current?.timeScale()!;
+          const cx = ts.timeToCoordinate(d.time as any);
+          if (typeof cx === "number") {
+            const lg = ts.coordinateToLogical(cx as any);
+            if (typeof lg === "number") logicalAppend = lg;
+          }
+        } catch {}
         notifyNewBar?.({
           open: d.open,
           high: d.high,
           low: d.low,
           close: d.close,
           time: d.time,
-        });
+          logical: logicalAppend,
+        } as any);
       } else {
         const payload = {
           time: d.time,

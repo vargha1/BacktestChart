@@ -71,9 +71,20 @@ export default function useTrendLine(
         else if (k.includes("info")) kind = "info";
         else if (k.includes("extended")) kind = "extended";
 
+        // only persist plain JSON-able options
+        const currentOpts = (anyL.getOptions?.() || anyL._options || {}) as any;
+        const safeOptions: any = {
+          side: currentOpts.side,
+          entryColor: currentOpts.entryColor,
+          tpColor: currentOpts.tpColor,
+          slColor: currentOpts.slColor,
+          lineColor: currentOpts.lineColor,
+          width: currentOpts.width,
+          bandBars: currentOpts.bandBars,
+        };
         const base = {
           kind,
-          options: anyL._options || anyL.getOptions?.(),
+          options: safeOptions,
         };
 
         if (kind === "horizontal") {
@@ -83,10 +94,16 @@ export default function useTrendLine(
           return { ...base, time: anyL._time };
         }
         if (kind === "position") {
-          // PositionTool stores entry/tp/sl under different internal names
-          const entry = anyL._entry ?? anyL._p1 ?? null;
-          const tp = anyL._tp ?? anyL._p2 ?? null;
-          const sl = anyL._sl ?? null;
+          // position: persist minimal plain objects
+          const entry = anyL._entry
+            ? {
+                time: anyL._entry.time ?? undefined,
+                logical: anyL._entry.logical ?? undefined,
+                price: anyL._entry.price,
+              }
+            : null;
+          const tp = anyL._tp;
+          const sl = anyL._sl;
           return { ...base, entry, tp, sl };
         }
         // trend/ray/info/extended -> p1/p2
@@ -168,9 +185,9 @@ export default function useTrendLine(
           if (entry && tp != null && sl != null) {
             try {
               const opts = { ...(d.options ?? {}) } as any;
-              // legacy support: sometimes width/bandWidth stored top-level
+              // legacy support: migrate persisted bandWidth to bandBars on load is not possible reliably,
+              // so keep as-is if provided; runtime will convert on first render.
               if (typeof d.bandWidth === "number") opts.bandWidth = d.bandWidth;
-              if (typeof d.width === "number") opts.bandWidth = d.width;
               tool = new PositionTool(
                 chartRef.current,
                 candlestickSeriesRef.current as any,
